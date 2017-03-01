@@ -1,0 +1,172 @@
+#/bin/sh
+
+#-- Auburn University High Performance and Parallel Computing
+#-- Hopper Cluster Sample Job Submission Script
+
+#-- This script provides the basic scheduler directives you
+#-- can use to submit a job to the Hopper scheduler.
+#-- Other than the last two lines it can be used as-is to
+#-- send a single node job to the cluster. Normally, you
+#-- will want to modify the #PBS directives below to reflect
+#-- your workflow...
+
+####-- For convenience, give your job a name
+
+#PBS -N Daphnia.TopHat
+
+#-- Provide an estimated wall time in which to run your job
+#-- The format is DD:HH:MM:SS.  
+
+#PBS -l walltime=03:00:00:00 
+
+#-- Indicate if\when you want to receive email about your job
+#-- The directive below sends email if the job is (a) aborted, 
+#-- when it (b) begins, and when it (e) ends
+
+#PBS -m abe tss0019@auburn.edu
+
+#-- Inidicate the working directory path to be used for the job.
+#-- If the -d option is not specified, the default working directory 
+#-- is the home directory. Here, we set the working directory
+#-- current directory
+
+#PBS -d /home/tss0019/Daphnia/Daphnia.Big.Data/Selenium.Young.Old.Moms.2015.10.22/
+
+#-- We recommend passing your environment variables down to the
+#-- compute nodes with -V, but this is optional
+
+#PBS -V
+
+#-- Specify the number of nodes and cores you want to use
+#-- Hopper's standard compute nodes have a total of 20 cores each
+#-- so, to use all the processors on a single machine, set your
+#-- ppn (processors per node) to 20.
+
+#PBS -l nodes=2:ppn=20
+
+#-- Now issue the commands that you want to run on the compute nodes.
+
+#-- With the -V option, you can load any software modules
+#-- either before submitting, or in the job submission script.
+
+#-- You should modify the lines below to reflect your own
+#-- workflow...
+
+#module load <myprogram_modulefile>
+#module load fastqc/11.5
+#module load trimmomatic/0.36
+module load samtools/1.3.1
+module load gcc/5.1.0
+module load bowtie2/2.2.9
+module load tophat/2.1.1
+module bcftools/1.3.1
+module load hisat/2.0.5
+module load stringtie/1.3.2d
+
+#./myprogram <parameters>
+
+#--  After saving this script, you can submit your job to the queue
+#--  with...
+
+#--  qsub sample_job.sh
+##########################################
+
+
+#PBS -j oe
+#PBS -q debug
+
+# Define DATADIR to be where the input files are
+DATADIR=/scratch/Daphnia/Se/Cleaned20161228_ConcatPairs
+
+# Define OUTDIR to be the place to run the job from
+OUTDIR=/scratch/Daphnia/Se/HiSat_StringTie
+
+#  Set the stack size to unlimited
+ulimit -s unlimited
+
+# Turn echo on so all commands are echoed in the output log
+set -x
+#
+
+mkdir $OUTDIR
+# Move to $OUTDIR
+cd $OUTDIR
+
+### copy the Genome file from my directory to OUTDIR
+cp /home/tss0019/Daphnia/Daphnia.Big.Data/Genome/Daphnia_pulex.fasta . 
+cp /home/tss0019/Genomes/FrozenGeneCatalog20110204.gff3 .
+
+#index the genome
+# bowtie-build [options]* <reference_in> <ebwt_base>
+# -f for fasta files as input
+hisat2-build -f Daphnia_pulex.fasta Daphnia_pulex
+
+
+#### Create list of fastq files to map:
+# ls (list) contents of directory with fastq files, cut the names of the files at 
+	#underscore characters and keep the first three chunks (i.e. fields; -f 1,2,3), 
+	#sort names and keep only the unique ones (there will be duplicates of all 
+	#file base names because of PE reads), then send the last 6 lines to a file 
+	#called list with tail
+			# 0ul_Se_Old_1_GCGAGT_All_R1_paired.fastq
+			# 0ul_Se_Old_1_GCGAGT_All_R2_paired.fastq
+
+		# 1 = 0ul
+		# 2 = Se
+		# 3 = Old
+		# 4 = 1
+		# 5 = GCGAGT
+
+cd /scratch/Daphnia/Se/Cleaned20161228_ConcatPairs/
+
+### Create List
+#  should list 0ul_Se_Old_1_GCGAGT
+ls | grep ".fastq" |cut -d "_" -f 1,2,3,4,5 | sort | uniq > list
+
+cd $OUTDIR
+cp /scratch/Daphnia/Se/Cleaned20161228_ConcatPairs/list . 
+
+#### Begin a loop using the list:
+# This particular bash command will cycle through each line in a given file and do all 
+	#the commands below for each line -- in our case the file (list) contains fastq base names.
+# While there are lines in list, the script will unzip the forward and reverse files of 
+	#one sample, trim adapter sequences and the first ten bp of each read, generate sam/bam files, 
+	#and make the count data file
+
+while read i;
+do
+###Usage: tophat [options]* <genome_index_base> <reads1_1[,...,readsN_1]> [reads1_2,...readsN_2]
+## -G means to use annotation file (extract transcripts and map to the transcripts)
+## -M means we are mainning to whole genome so exclude multi-mapped reads
+## -N is the number of mismatches allowed
+
+hisat2 -p 20 --dta --fr -x Daphnia_pulex -1 /scratch/Daphnia/Se/Cleaned20161228_ConcatPairs/"$i"_All_R1_paired.fastq -2 /scratch/Daphnia/Se/Cleaned20161228_ConcatPairs/"$i"_All_R2_paired.fastq -S "$i".sam
+samtools view -@ 20 -bS ${i}.sam  | samtools sort -@ 20 -  ${i}   
+
+# Example Input: 0ul_Se_Old_1_GCGAGT.sam; Output: 0ul_Se_Old_1_GCGAGT_sorted.bam
+stringtie -p 20 -G FrozenGeneCatalog20110204.gff3 -o "$i".gtf  -l "$i"  "$i".bam 
+
+done<list
+
+#### Merge transcripts
+# 0ul_Se_Young_2_GACAGT.gtf
+ls | grep ".gtf"  | sort | uniq > mergedlist.txt
+
+stringtie --merge -p 8 -G  FrozenGeneCatalog20110204.gff3 -o stringtie_merged.gtf mergedlist.txt
+
+#### examine how the transcrpts compare with the referenece annotation
+gffcompare -r FrozenGeneCatalog20110204.gff3 -merged stringtie_merged.gtf
+
+
+mkdir ballgown
+
+# Estiamte transcript abundance and create table of counts for ballgown
+while read i;
+do
+
+mkdir /ballgown/"$i"/
+
+stringtie -e -B -p 8 -G stringtie_merged.gtf -o /ballgown/"$i"/"$i".gtf/ "$i".bam
+
+done<list
+

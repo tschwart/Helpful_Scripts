@@ -1,0 +1,4 @@
+
+
+##Submit job using a full schwartz lab node 
+qsub -l nodes=1:ppn=20,walltime=80:00:00:00 -W x=FLAGS:ADVRES:tss0019_lab <job.sh>
